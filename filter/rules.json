@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "_comment": [
+    "Scoring rules for filter/mail-filter.js.",
+    "A message is junked when total >= threshold AND it scored in >= minCategories",
+    "distinct categories. Requiring two categories is what stops a single unlucky word",
+    "from junking real mail: 'Israel' alone scores 2 in one category and goes nowhere.",
+    "Patterns are JS regex source, matched case-insensitively against subject + body.",
+    "Keep them literal — no nested quantifiers (catastrophic backtracking on a 1 MB body).",
+    "Per-box override: put a copy at /etc/cocx/mail-filter-rules.json (cocx points MAIL_FILTER_RULES at it).",
+    "The account's own domain is always allowed (MAIL_FILTER_ALLOW_OWN_DOMAIN=0 disables);",
+    "allowFromDomains is for OTHER trusted domains."
+  ],
+  "threshold": 6,
+  "minCategories": 2,
+  "minCategoryScore": 2,
+  "quotedCap": 2,
+  "maxBodyBytes": 262144,
+
+  "allowFromDomains": [],
+  "allowFromAddresses": [],
+
+  "freemailDomains": [
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk", "ymail.com",
+    "hotmail.com", "outlook.com", "live.com", "msn.com", "aol.com",
+    "protonmail.com", "proton.me", "gmx.com", "gmx.net", "mail.com",
+    "yandex.com", "yandex.ru", "zoho.com", "inbox.lv", "consultant.com"
+  ],
+
+  "structural": {
+    "toIsFrom": 3,
+    "toPlaceholder": 3,
+    "bccBlast": 3,
+    "bodyContactAddress": 3,
+    "replyToMismatch": 2,
+    "freemailSender": 1
+  },
+
+  "negatives": {
+    "forwardedReport": -5,
+    "rfc822Attachment": -4
+  },
+
+  "_quoteMarkersComment": [
+    "Where the carrier's own words end and quoted third-party text begins. Everything",
+    "from the FIRST match onward is scored at the global quotedCap instead of full",
+    "weight — see the split in classify(). Matched multiline, case-insensitively."
+  ],
+  "quoteMarkers": [
+    "begin forwarded message",
+    "-{3,}\\s*original message\\s*-{3,}",
+    "-{3,}\\s*forwarded message\\s*-{3,}",
+    "^\\s*received: from ",
+    "^\\s*>\\s?\\S",
+    "^\\s*on .{0,60}wrote:\\s*$"
+  ],
+
+  "negativePatterns": [
+    "(reporting|report(ing)? of|to report) (this|the following|an?) (spam|abuse|phish|fraud|scam)",
+    "abuse report",
+    "please (investigate|take action|look into) (this|the following)"
+  ],
+
+  "categories": {
+    "advance_fee": {
+      "weight": 2,
+      "cap": 8,
+      "solo": true,
+      "_comment": "The money-movement skeleton every 419 shares, whatever the pretext.",
+      "patterns": [
+        "next of kin",
+        "\\bbeneficiar(y|ies)\\b",
+        "\\bconsignment\\b",
+        "storage (facility|company|house)",
+        "trunk box",
+        "diplomatic (courier|agent|delivery|immunity)",
+        "(foreign )?currency (exchanger|dealer|trader)",
+        "millions? (of|in) (shekels?|dollars?|euros?|pounds?|usd)",
+        "(us ?\\$|usd|eur|gbp)\\s?[0-9][0-9,. ]{5,}",
+        "funds? transfer",
+        "transfer (of|the) (funds?|money|sum)",
+        "\\binheritance\\b",
+        "unclaimed (funds?|deposits?|estate)",
+        "(percentage|share) of the (total )?(funds?|money|sum|amount)",
+        "bank (draft|transfer|details)",
+        "deposited (it|them|the (boxes|funds|money)) in",
+        "\\bloot(ed|ing)?\\b",
+        "seized by",
+        "out of the country for (safety|safe ?keeping)",
+        "business (proposal|partnership) (with|for) you"
+      ]
+    },
+
+    "appeal": {
+      "weight": 2,
+      "cap": 6,
+      "_comment": "The trust-building opener. Weak alone, decisive in combination.",
+      "patterns": [
+        "dear (friend|beloved|good friend|sir/ ?madam|one)",
+        "urgent (help|assistance|attention|reply|response)",
+        "help (needed|required)",
+        "seek(ing)? (an? )?(honest|trust(ed|worthy)|reliable|God ?fearing) (assistan|partner|person|help)",
+        "i (need|require) your (help|assistance|urgent)",
+        "strictly confidential",
+        "(may )?god bless you",
+        "contact me (on|at|through) (this|the following) email",
+        "for (further|more) details",
+        "i use this opportunity",
+        "keep this (transaction|matter) (secret|confidential)"
+      ]
+    },
+
+    "crisis_pretext": {
+      "weight": 2,
+      "cap": 4,
+      "_comment": [
+        "The rotating geopolitical pretext (Nigeria -> Syria -> Ukraine -> Gaza).",
+        "SUPPORTING evidence only: capped at 4 — BELOW the threshold on purpose, so this",
+        "category can never reach a verdict without corroboration. minCategories means a",
+        "hits nothing but this can never be junked. That is deliberate — a real press or",
+        "personal email may name a conflict, and news words are not a spam signal."
+      ],
+      "patterns": [
+        "\\bhamas\\b",
+        "\\bidf\\b",
+        "\\bisrael(i|is)?\\b",
+        "\\bpalestin(e|ian|ians)\\b",
+        "\\bgaza\\b",
+        "\\brafah\\b",
+        "west[ -]bank",
+        "\\bshekels?\\b",
+        "\\bhezbollah\\b",
+        "\\bukraine\\b|\\bdonbas\\b",
+        "\\bsyria(n)?\\b",
+        "civil war",
+        "(bombed|bombing|air ?strike|shelling|missile)",
+        "\\brefugee(s)?\\b",
+        "killed (by|in|during)",
+        "soldiers (came|destroyed|looted|raided)",
+        "(senior|high ?ranking) (hamas|militant|rebel) official"
+      ]
+    },
+
+    "seo_outreach": {
+      "weight": 2,
+      "cap": 6,
+      "solo": true,
+      "_comment": [
+        "Unsolicited SEO/backlink/web-design pitches — the other half of what a public",
+        "admin@ receives. Patterns are taken from the real messages that arrived, not",
+        "from memory: the first draft matched 'I visited your website' and missed the",
+        "actual 'I recently reviewed your <domain>', scoring 3 instead of a verdict.",
+        "solo:true because a pitch that trips three distinct patterns needs no",
+        "corroboration — unlike crisis_pretext, which must never convict alone."
+      ],
+      "patterns": [
+        "back ?links?",
+        "guest post(ing|s)?",
+        "seo (services|expert|agency|audit|specialist|company|strateg(y|ies))",
+        "(increase|boost|improve|grow) your (traffic|ranking|rankings|sales|visibility|leads)",
+        "(first page|page ?1) (of|on) google",
+        "get you to page ?1",
+        "(isn'?t|not) ranking (well )?(on|in) google",
+        "top of google",
+        "i (visited|came across|stumbled upon|was browsing|recently reviewed|reviewed|looked at|analy[sz]ed) your",
+        "targeted (visitors|traffic|audience)",
+        "convert them into customers",
+        "web (design|development) (services|company|agency)",
+        "domain authority",
+        "digital marketing (services|agency|expert|consultant)",
+        "marketing consultant",
+        "no obligation",
+        "if you( a|')re interested,? (let me know|reply|please)",
+        "(share|send) your contact details",
+        "(monthly|affordable) (seo|marketing) (package|plan)"
+      ]
+    }
+  }
+}
