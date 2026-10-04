@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+#
+# cocx-backup — nightly verified snapshots of a mox install, with count-based rotation.
+# Installed on the mail host as /usr/local/sbin/cocx-backup by `cocx` (BACKUP=yes).
+#
+#   cocx-backup                 take a backup now
+#   cocx-backup --install       (re)write the systemd unit + timer, enable, run once
+#   cocx-backup --install --no-run
+#   journalctl -u cocx-backup   watch it
+#   restore: `cocx restore <archive>` from the operator machine
+#
+# WHY `mox backup` AND NOT tar/rsync OF THE DATA DIR
+#   mox's databases are BoltDB/bstore files held open by the running server. Its own
+#   documentation is explicit: "Simply copying files in the data directory while mox is
+#   running can result in unusable database files." A tar of the data dir would usually
+#   appear to work and would be silently unrestorable — the worst failure mode a backup
+#   can have. `mox backup` takes a consistent snapshot instead, and hard-links the
+#   immutable message files so it is fast and cheap.
+#
+# WHAT IS IN IT — treat the archive as a SECRET
+#   config/ carries the DKIM PRIVATE KEYS, the host keys and the admin password hash;
+#   data/ carries every message. The destination is mode 0700 and the archives 0600.
+#
+# Configuration: /etc/cocx/backup.env (written by cocx), all optional:
+#   MAIL_BACKUP_DIR  MAIL_BACKUP_DAILY_KEEP  MAIL_BACKUP_WEEKLY_KEEP
+#   MAIL_BACKUP_MONTHLY_KEEP  MAIL_BACKUP_MIN_BYTES  MAIL_BACKUP_TIME
+set -euo pipefail
+
+# ---- config (env-overridable) ----------------------------------------------
+# shellcheck disable=SC1091
+[ -f /etc/cocx/backup.env ] && . /etc/cocx/backup.env
+MOX_HOME="${MAIL_BACKUP_MOX_HOME:-/home/mox}"
+DEST="${MAIL_BACKUP_DIR:-/var/backups/mox}"
+DAILY_KEEP="${MAIL_BACKUP_DAILY_KEEP:-7}"
+WEEKLY_KEEP="${MAIL_BACKUP_WEEKLY_KEEP:-4}"
+MONTHLY_KEEP="${MAIL_BACKUP_MONTHLY_KEEP:-6}"
+# Sanity floor, set from MEASUREMENTS, not guesses: a complete archive of a FRESH
+# install (config, DKIM + host keys, empty databases) is ~29 KiB; a small live install is
+# ~100 KiB. A truncated or empty gzip is under 1 KiB. Guessed floors (256 KiB, then
+# 32 KiB) each rejected a perfectly good backup. The content assertions below are what
+# catch a structurally wrong archive; this only catches an empty one.
+MIN_BYTES="${MAIL_BACKUP_MIN_BYTES:-16384}"
+
+log(){ echo "[cocx-backup] $*"; }
+die(){ echo "[cocx-backup] ERROR: $*" >&2; exit 1; }
+
+# ---- self-install: write systemd unit + timer, enable, run once ------------
+if [[ "${1:-}" == "--install" ]]; then
+  NO_RUN=0
+  [[ "${2:-}" == "--no-run" ]] && NO_RUN=1   # cocx update path: install/refresh only
+  [[ $EUID -eq 0 ]] || die "--install must run as root"
+  SELF="$(readlink -f "$0")"
+  [[ "$SELF" == "/usr/local/sbin/cocx-backup" ]] || {
+    install -m 0755 "$SELF" /usr/local/sbin/cocx-backup
+    SELF=/usr/local/sbin/cocx-backup
+  }
+  log "installing systemd service + daily timer"
+  cat > /etc/systemd/system/cocx-backup.service <<'UNIT'
+[Unit]
+Description=mox backup — consistent snapshot + verify + rotation (cocx)
+After=mox.service
+Wants=mox.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cocx-backup
+Nice=10
+IOSchedulingClass=idle
+# /usr,/boot,/etc read-only, /var writable for the archives. 'full' rather than 'strict'
+# because runuser->mox needs PAM, and NoNewPrivileges must stay false for the setuid in
+# runuser.
+ProtectSystem=full
+ProtectHome=false
+PrivateTmp=true
+NoNewPrivileges=false
+UNIT
+  cat > /etc/systemd/system/cocx-backup.timer <<UNIT
+[Unit]
+Description=mox backup — nightly (cocx)
+
+[Timer]
+OnCalendar=*-*-* ${MAIL_BACKUP_TIME:-03:50}:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now cocx-backup.timer
+  log "timer enabled:"; systemctl list-timers cocx-backup.timer --no-pager --no-legend || true
+  (( NO_RUN )) && exit 0
+  log "running an initial backup now..."
+  exec "$SELF"
+fi
+
+# ---- backup ----------------------------------------------------------------
+[[ -x "$MOX_HOME/mox" ]] || die "mox binary not found at $MOX_HOME/mox"
+id mox >/dev/null 2>&1 || die "mox user missing"
+
+mkdir -p "$DEST"/{daily,weekly,monthly}
+chmod 700 "$DEST"
+
+ts="$(date +%Y%m%d-%H%M%S)"
+out="$DEST/daily/mox-${ts}.tar.gz"
+tmp="${out}.partial"
+
+# Staged UNDER the mox data dir on purpose: `mox backup` hard-links message files when
+# the destination shares a filesystem with the source, which makes the snapshot near
+# instant and near free. A destination on another filesystem silently degrades to full
+# copies — still correct, just slower and larger.
+stage="$MOX_HOME/data/tmp/backup-$$"
+cleanup(){ rm -rf "$stage" "$tmp"; }
+trap cleanup EXIT
+
+rm -rf "$stage"; mkdir -p "$stage"; chown mox:mox "$stage"
+
+# ⚠ cd FIRST. mox resolves its config as the RELATIVE path "config/mox.conf", so it must
+# run with $MOX_HOME as the working directory. Invoked by absolute path from elsewhere it
+# dies with "open config/mox.conf: permission denied" — which reads like a file-permission
+# problem and is actually a working-directory one. (Cost one failed install to find.)
+cd "$MOX_HOME" || die "cannot cd to $MOX_HOME"
+
+# Errors are CAPTURED and echoed rather than sent to /dev/null: a backup that fails
+# silently at night is indistinguishable from one that never ran, and the whole point of
+# this script is to not have that class of surprise.
+log "snapshotting mox config+data -> $stage"
+if ! err="$(runuser -u mox -- "$MOX_HOME/mox" backup "$stage" 2>&1 >/dev/null)"; then
+  die "mox backup failed: ${err:-<no output>}"
+fi
+
+# Integrity BEFORE we keep it. A backup
+# that has not been read back is a guess, and this is the cheapest possible read-back —
+# it validates every BoltDB file and checks messages against the database.
+log "verifying snapshot"
+if ! err="$(runuser -u mox -- "$MOX_HOME/mox" verifydata "$stage/data" 2>&1 >/dev/null)"; then
+  die "mox verifydata failed — snapshot is corrupt, discarding: ${err:-<no output>}"
+fi
+
+log "archiving -> $out"
+tar -C "$stage" -czf "$tmp" config data || die "tar failed"
+chmod 600 "$tmp"
+
+sz=$(stat -c %s "$tmp")
+(( sz >= MIN_BYTES )) || die "archive too small (${sz} bytes < ${MIN_BYTES}) — refusing to keep/rotate"
+# Independently confirm the archive itself is readable, not just the staged tree: the
+# tar could have been truncated by a full disk after a perfectly good snapshot.
+tar -tzf "$tmp" >/dev/null 2>&1 || die "archive is unreadable — discarding"
+
+# CONTENT assertion, which a byte count cannot give you: a structurally wrong archive
+# can still be large. These are what a restore actually needs — both config files, the
+# DKIM private keys (without which the domain cannot sign mail again) and the databases
+# (which index every message). Asserting on them is what makes this a backup rather than
+# a file of the right size.
+listing="$(tar -tzf "$tmp")"
+wants=('config/mox.conf' 'config/domains.conf' 'config/dkim/' '\.db$')
+# mox-mode installs carry the DANE host keys; losing them means new TLSA records and a
+# DANE outage on restore, so they are part of the contract when they exist.
+[ -d "$MOX_HOME/config/hostkeys" ] && wants+=('config/hostkeys/')
+for want in "${wants[@]}"; do
+  printf '%s\n' "$listing" | grep -qE "$want" \
+    || die "archive is missing '${want}' — refusing to keep it"
+done
+
+mv "$tmp" "$out"
+rm -rf "$stage"
+log "ok: $(numfmt --to=iec "$sz" 2>/dev/null || echo "${sz}B") — snapshot verified, archive readable"
+
+# ---- promote to weekly / monthly -------------------------------------------
+# Hardlinks, not copies: same bytes, stored once.
+[[ "$(date +%u)" == "1" ]]  && { ln -f "$out" "$DEST/weekly/";  log "promoted -> weekly";  }
+[[ "$(date +%d)" == "01" ]] && { ln -f "$out" "$DEST/monthly/"; log "promoted -> monthly"; }
+
+# ---- rotate (count-based; robust to missed runs) ---------------------------
+count(){ local a=( "$1"/*.tar.gz ); [[ -e "${a[0]}" ]] && echo "${#a[@]}" || echo 0; }
+prune(){
+  local d="$1" k="$2" i files=()
+  mapfile -t files < <(ls -1t "$d"/*.tar.gz 2>/dev/null || true)
+  for (( i=k; i<${#files[@]}; i++ )); do
+    rm -f "${files[i]}"; log "  pruned $(basename "${files[i]}")"
+  done
+}
+prune "$DEST/daily"   "$DAILY_KEEP"
+prune "$DEST/weekly"  "$WEEKLY_KEEP"
+prune "$DEST/monthly" "$MONTHLY_KEEP"
+
+log "retention: daily=$(count "$DEST/daily") weekly=$(count "$DEST/weekly") monthly=$(count "$DEST/monthly")"
+log "total on disk: $(du -sh "$DEST" 2>/dev/null | cut -f1)"
+log "done."

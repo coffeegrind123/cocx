@@ -1,0 +1,82 @@
+# cocx configuration. Copy to cocx.conf (gitignored) or pass -c <file>; one file per server.
+# Sourced by bash: KEY=value, no spaces around '=', quote values containing spaces.
+
+# ------------------------------------------------------------------ identity (required)
+MAIL_DOMAIN=example.com              # the domain you receive mail for
+MAIL_HOSTNAME=mail.example.com       # SMTP/IMAP hostname; its PTR must equal this
+MAIL_ACCOUNT=admin@example.com       # primary account; also gets abuse@ and postmaster@
+
+# --------------------------------------------------------------------- the target box
+# An IP/hostname reached over SSH, or "local" to run directly on this machine (as root).
+HOST=203.0.113.10
+SSH_USER=root                        # non-root works via passwordless `sudo -n`
+SSH_PORT=22
+SSH_KEY=~/.ssh/id_ed25519
+# SSH_OPTS="-o StrictHostKeyChecking=accept-new"
+
+# Behind 1:1 NAT the route source address is private; set the public ones explicitly.
+# PUBLIC_IP4=
+# PUBLIC_IP6=
+IPV6=auto                            # auto | off. auto = dual-stack when the box has global v6.
+                                     # "off" only if v6 is truly unusable: mox SENDS over v6
+                                     # whenever it can, so "off" must mean the box has none.
+
+# ----------------------------------------------------------- who owns ports 80 and 443
+#   caddy           cocx installs Caddy (>= 2.8) and manages a mail vhost in it; other
+#                   sites can live in the same Caddy. mox reads Caddy's certificates.
+#   caddy-external  Caddy is already run by something else (a container, another tool).
+#                   cocx writes the vhost snippet to /etc/cocx/caddy-mail.caddy for you to
+#                   import, and reads certificates from CADDY_CERT_DIR.
+#   mox             mox owns 80/443 and does its own ACME. Nothing else may use those ports.
+WEBSERVER=caddy
+ACME_EMAIL=                          # default: MAIL_ACCOUNT
+# Caddy only. letsencrypt | letsencrypt-staging | internal (internal = self-signed, tests only)
+CADDY_ISSUER=letsencrypt
+# caddy-external only: the directory holding <host>/<host>.crt and .key for the issuer.
+# CADDY_CERT_DIR=/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory
+
+# Expose webmail + account pages at https://MAIL_HOSTNAME/ (admin stays tunnel-only).
+PUBLIC_WEBMAIL=no
+# Where a browser landing on / of mta-sts.* / autoconfig.* (and mail.* when webmail is not
+# public) is sent. Empty = mox's own 404. Search engines find these hosts through
+# certificate-transparency logs and report the 404 as a crawl error, so point it at a site.
+ROOT_REDIRECT=
+
+# ------------------------------------------------------------------------------- DNS
+#   cloudflare  records are created/updated through the API (never proxied)
+#   manual      cocx prints the records and verifies them over DoH; you publish them
+#   none        cocx only prints the records (labs; DNS owned by another system)
+DNS_PROVIDER=cloudflare
+CF_TOKEN_FILE=~/.config/cocx/cloudflare_token   # Zone:DNS:Edit + Zone:DNSSEC:Edit + Zone:Read
+CF_ZONE_ID=                          # default: looked up from CF_ZONE_NAME
+CF_ZONE_NAME=                        # default: MAIL_DOMAIN
+
+# ------------------------------------------------------------------ hosting provider
+# rDNS and outbound-SMTP unblocking are provider ACCOUNT actions with a different API at
+# every host. Point this at an executable implementing hooks/provider.example (keep it and
+# its credentials outside the repo); empty = you do both by hand. Either way, `cocx check`
+# verifies the PTR (v4 + v6) and probes outbound :25.
+PROVIDER_HOOK=
+
+# ---------------------------------------------------------------------------- policy
+MTASTS_MAXAGE=168h0m0s               # senders cache AND enforce this long; 1 week
+ROLE_ADDRESSES="abuse"               # RFC 2142 aliases to MAIL_ACCOUNT (postmaster is built in)
+CAA_ISSUERS="letsencrypt.org sectigo.com"   # sectigo = Caddy's ZeroSSL fallback; keep it
+
+# BIMI inbox logo. Either a local SVG Tiny PS file cocx serves at
+# https://MAIL_HOSTNAME/bimi/logo.svg (check it with tools/bimi-logo.py check), or the URL
+# of one hosted elsewhere. Needs DMARC p=quarantine|reject (mox's default is reject).
+BIMI_LOGO=
+BIMI_LOGO_URL=
+
+# ------------------------------------------------------------------------- services
+JUNK_FILTER=yes                      # body-aware filter; moves junk to Junk over IMAP
+JUNK_FILTER_INTERVAL=15min
+BACKUP=yes                           # nightly verified `mox backup` with rotation
+BACKUP_DIR=/var/backups/mox
+BACKUP_TIME="03:50"
+BACKUP_KEEP="7 4 6"                  # daily weekly monthly
+DNSSEC_RESOLVER=yes                  # local validating unbound; required for DANE
+# auto: add ACCEPT rules only where a firewall is actually filtering (ufw, firewalld,
+#       iptables/nftables with a DROP policy). off: never touch the firewall.
+FIREWALL=auto

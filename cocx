@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# cocx — install, update and operate a fully featured mox mail server.
+#
+# mox built from upstream main with an OpenPGP webmail patch series, behind Caddy or on
+# its own ACME; DNSSEC + DANE + MTA-STS + TLSRPT + BIMI; dual-stack with every IPv6 piece
+# declared; a body-aware junk filter that trains mox's bayesian filter; nightly verified
+# backups. One command provisions a bare box and updates a live one.
+#
+# Run `cocx help` for commands. Configuration: cocx.conf (see cocx.conf.example).
+set -euo pipefail
+
+COCX_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+usage: cocx [-c cocx.conf] [--host HOST] <command> [options]
+
+  (none) | auto      install on a bare box, update a live one — the normal command
+  install            force the full install path
+  update             force the update path (FORCE_BUILD=1 rebuilds even when current)
+  check              health check: every fact that silently breaks mail; changes nothing
+  dns [--prune]      re-sync DNS (cloudflare) or print + verify it (manual). --prune also
+                     deletes stale mail records (retired DKIM selectors); never automatic
+  blocklists         the host's IPs and domain against the major DNSBLs, with controls
+  ds                 print the DS record to publish at the registrar (the one DANE step
+                     no DNS API can do)
+  set-rdns           run PROVIDER_HOOK set-rdns for the host's v4 + v6 addresses
+  open-smtp          run PROVIDER_HOOK open-smtp, then check
+  filter-dry-run     score new mail in the Inbox, move nothing
+  filter-explain UID full score breakdown for one message
+  backup             take a verified backup now
+  restore ARCHIVE [--yes]   restore a backup archive (path on the host); dry run without --yes
+  reset [--yes] [--mailboxes-only|--reports-only] [--no-backup]
+                     empty every mailbox + stash the report DBs, keeping all config
+  restore-reports STASH   put stashed report databases back
+  rollback           swap back to the previous mox binary
+  tunnel [PORT]      SSH tunnel to the admin/webmail UI (default local port 8080)
+  credentials        print the quickstart-generated admin and account passwords
+  vhost              print the Caddy vhost cocx would write
+  help
+EOF
+}
+
+# ------------------------------------------------------------------ arguments
+CONF="${COCX_CONF:-}"
+HOST_OVERRIDE=""
+CMD=""
+ARGS=()
+APPLY=0
+PRUNE=0
+NO_BACKUP=0
+RESET_SCOPE=all
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c|--config) CONF="$2"; shift 2 ;;
+    --host)      HOST_OVERRIDE="$2"; shift 2 ;;
+    --yes|--apply) APPLY=1; shift ;;
+    --prune)     PRUNE=1; shift ;;
+    --no-backup) NO_BACKUP=1; shift ;;
+    --mailboxes-only) RESET_SCOPE=mailboxes; shift ;;
+    --reports-only)   RESET_SCOPE=reports; shift ;;
+    -h|--help|help) usage; exit 0 ;;
+    -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) if [ -z "$CMD" ]; then CMD="$1"; else ARGS+=("$1"); fi; shift ;;
+  esac
+done
+CMD="${CMD:-auto}"
+export APPLY PRUNE NO_BACKUP RESET_SCOPE
+
+# --------------------------------------------------------------------- config
+if [ -z "$CONF" ]; then
+  if [ -f ./cocx.conf ]; then CONF=./cocx.conf; else CONF="$COCX_DIR/cocx.conf"; fi
+fi
+[ -f "$CONF" ] || { echo "ERROR: no config at $CONF (copy cocx.conf.example)" >&2; exit 2; }
+# shellcheck disable=SC1090
+. "$CONF"
+
+# shellcheck source=lib/common.sh
+. "$COCX_DIR/lib/common.sh"
+for f in toolchain mox web net dns provider services check; do
+  # shellcheck disable=SC1090
+  . "$COCX_DIR/lib/$f.sh"
+done
+
+# shellcheck disable=SC2088  # matching a LITERAL "~/" in the config value
+expand() { case "$1" in "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
+
+[ -n "$HOST_OVERRIDE" ] && HOST="$HOST_OVERRIDE"
+: "${HOST:?HOST is required}" "${MAIL_DOMAIN:?MAIL_DOMAIN is required}"
+: "${MAIL_HOSTNAME:?MAIL_HOSTNAME is required}" "${MAIL_ACCOUNT:?MAIL_ACCOUNT is required}"
+SSH_USER="${SSH_USER:-root}"
+SSH_PORT="${SSH_PORT:-22}"
+SSH_KEY="$(expand "${SSH_KEY:-}")"
+WEBSERVER="${WEBSERVER:-caddy}"
+CADDY_ISSUER="${CADDY_ISSUER:-letsencrypt}"
+CADDY_CERT_DIR="${CADDY_CERT_DIR:-}"
+PUBLIC_WEBMAIL="${PUBLIC_WEBMAIL:-no}"
+ROOT_REDIRECT="${ROOT_REDIRECT:-}"
+DNS_PROVIDER="${DNS_PROVIDER:-manual}"
+CF_TOKEN_FILE="$(expand "${CF_TOKEN_FILE:-~/.config/cocx/cloudflare_token}")"
+PROVIDER_HOOK="$(expand "${PROVIDER_HOOK:-}")"
+MTASTS_MAXAGE="${MTASTS_MAXAGE:-168h0m0s}"
+ROLE_ADDRESSES="${ROLE_ADDRESSES-abuse}"
+CAA_ISSUERS="${CAA_ISSUERS:-letsencrypt.org sectigo.com}"
+BIMI_LOGO="$(expand "${BIMI_LOGO:-}")"
+JUNK_FILTER="${JUNK_FILTER:-yes}"
+JUNK_FILTER_INTERVAL="${JUNK_FILTER_INTERVAL:-15min}"
+BACKUP="${BACKUP:-yes}"
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/mox}"
+BACKUP_TIME="${BACKUP_TIME:-03:50}"
+BACKUP_KEEP="${BACKUP_KEEP:-7 4 6}"
+
+# Validation that turns a silent misconfiguration into an immediate, named error.
+case "$WEBSERVER" in caddy|caddy-external|mox) ;; *) die "WEBSERVER must be caddy, caddy-external or mox" ;; esac
+case "$CADDY_ISSUER" in letsencrypt|letsencrypt-staging|internal) ;; *) die "CADDY_ISSUER must be letsencrypt, letsencrypt-staging or internal" ;; esac
+case "$DNS_PROVIDER" in cloudflare|manual|none) ;; *) die "DNS_PROVIDER must be cloudflare, manual or none" ;; esac
+case "$PUBLIC_WEBMAIL" in yes|no) ;; *) die "PUBLIC_WEBMAIL must be yes or no" ;; esac
+[ "${MAIL_ACCOUNT#*@}" = "$MAIL_DOMAIN" ] \
+  || die "MAIL_ACCOUNT ($MAIL_ACCOUNT) must be an address at MAIL_DOMAIN ($MAIL_DOMAIN) — quickstart derives the domain from it"
+case "$MAIL_HOSTNAME" in *".$MAIL_DOMAIN") ;; *) warn "MAIL_HOSTNAME is not under MAIL_DOMAIN — fine for mox, but the DNS sync only manages records inside the zone" ;; esac
+if [ "$WEBSERVER" = "caddy-external" ]; then
+  [ -n "$CADDY_CERT_DIR" ] || die "WEBSERVER=caddy-external needs CADDY_CERT_DIR"
+fi
+if [ "$HOST" = "local" ] && [ "$(id -u)" != 0 ]; then
+  die "HOST=local must run as root"
+fi
+if [ -n "$ROOT_REDIRECT" ]; then
+  case "$ROOT_REDIRECT" in https://*|http://*) ;; *) die "ROOT_REDIRECT must be an absolute http(s) URL" ;; esac
+fi
+
+# ---------------------------------------------------------------------- flows
+#
+# The bare-box flow, in dependency order:
+#   host basics -> DNS for the hostnames (certificates need it) -> web side -> build ->
+#   quickstart -> certificates -> mox.conf/DANE/policy -> units -> services ->
+#   provider actions -> zone hardening -> the full record set -> health check.
+do_install() {
+  msg "Installing on $HOST ($WEBSERVER mode, DNS $DNS_PROVIDER)."
+  ensure_debian
+  install_prereqs
+  if [ "$WEBSERVER" = "mox" ]; then
+    local busy
+    busy="$(rsh_q "ss -Hlnt | awk '{print \$4}' | grep -E ':(80|443)\$' | grep -v '127\\.0\\.0\\.1' | head -3 | tr '\n' ' '")"
+    [ -z "$busy" ] || rsh_q 'pgrep -x mox' | grep -q . \
+      || die "WEBSERVER=mox needs ports 80/443 free, but something listens on: $busy (use WEBSERVER=caddy or caddy-external)"
+  fi
+  fix_etc_hosts
+  install_unbound
+  open_ports
+  dns_bootstrap_hostname || die "the mail hostnames must resolve here before certificates can be issued"
+  install_caddy
+  configure_caddy
+  ship_bimi_logo
+  install_go
+  install_node
+  build_mox
+  quickstart
+  wait_for_certs || die "cannot continue without certificates"
+  configure_mox
+  setup_dane
+  ensure_mtasts_maxage
+  ensure_mox_web_handlers
+  install_units
+  restart_mox
+  # After mox is up: address changes go through its control socket.
+  ensure_role_addresses
+  seed_filter_credentials
+  install_filter
+  install_backup
+  provider_set_rdns
+  provider_open_smtp
+  ensure_dnssec
+  ensure_caa
+  sync_dns || true
+  msg "Install complete. Passwords: \`cocx credentials\`. Admin UI: \`cocx tunnel\`."
+}
+
+# Reconciles EVERYTHING on every run, binary or not — cheap and idempotent, and it is what
+# catches a firewall that lost its rules, a vhost someone edited, or DNS that drifted.
+do_update() {
+  local before after
+  ensure_debian
+  install_prereqs
+  if mox_needs_build; then
+    install_go
+    install_node
+    build_mox
+    swap_mox_binary || die "the new build was rejected; the running binary is untouched"
+    FORCE_RESTART=1
+  fi
+  before="$(rsh_q "md5sum $MOX_HOME/config/mox.conf $MOX_HOME/config/dane-mail.key")"
+  fix_etc_hosts
+  install_unbound
+  open_ports
+  install_caddy
+  configure_caddy
+  ship_bimi_logo
+  configure_mox
+  setup_dane
+  ensure_mtasts_maxage
+  ensure_mox_web_handlers
+  install_units
+  after="$(rsh_q "md5sum $MOX_HOME/config/mox.conf $MOX_HOME/config/dane-mail.key")"
+  # mox.conf is read only at startup; domains.conf changes are picked up live by mox.
+  if [ "${FORCE_RESTART:-0}" = 1 ] || [ "$before" != "$after" ]; then
+    msg "Restarting mox (new binary or static config changed)..."
+    restart_mox
+  fi
+  rsh 'systemctl is-active --quiet mox' || restart_mox
+  ensure_role_addresses
+  seed_filter_credentials
+  install_filter
+  install_backup
+  ensure_dnssec
+  ensure_caa
+  sync_dns || true
+}
+
+do_tunnel() {
+  local port="${1:-8080}" target
+  if [ "$WEBSERVER" = "mox" ]; then target=127.0.0.1:80; else target=127.0.0.1:1080; fi
+  echo "admin:   http://localhost:$port/admin/     (user: empty; password: cocx credentials)"
+  echo "webmail: http://localhost:$port/webmail/   (user: $MAIL_ACCOUNT)"
+  echo "account: http://localhost:$port/"
+  if [ "$HOST" = "local" ]; then
+    echo "(HOST=local: browse to http://$target/ directly)"
+    return 0
+  fi
+  echo "tunnel open — Ctrl-C to close"
+  # shellcheck disable=SC2086
+  exec ssh -N ${SSH_OPTS:-} -p "$SSH_PORT" ${SSH_KEY:+-i "$SSH_KEY"} -L "$port:$target" "$SSH_USER@$HOST"
+}
+
+case "$CMD" in
+  auto)
+    if mox_installed; then msg "mox present on $HOST — updating."; do_update; else do_install; fi
+    health_check ;;
+  install) do_install; health_check ;;
+  update)  do_update;  health_check ;;
+  check)   health_check ;;
+  dns)     sync_dns ;;
+  ds)      show_ds ;;
+  blocklists) blocklist_check ;;
+  set-rdns)  provider_set_rdns ;;
+  open-smtp) provider_open_smtp; health_check ;;
+  filter-dry-run) filter_run ;;
+  filter-explain) [ -n "${ARGS[0]:-}" ] || die "usage: cocx filter-explain <uid>"; filter_run --explain "${ARGS[0]}" ;;
+  backup)  backup_now ;;
+  restore) restore_backup "${ARGS[0]:-}" ;;
+  reset)   reset_mail ;;
+  restore-reports) restore_reports "${ARGS[0]:-}" ;;
+  rollback) rollback_mox ;;
+  tunnel)  do_tunnel "${ARGS[0]:-}" ;;
+  credentials) rsh "grep -iE 'password' $QUICKSTART_OUT" ;;
+  vhost)   caddy_vhost ;;
+  *) echo "unknown command: $CMD" >&2; usage >&2; exit 2 ;;
+esac

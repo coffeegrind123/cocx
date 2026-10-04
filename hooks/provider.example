@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Template for a cocx provider hook. Copy it OUTSIDE the repo (e.g. ~/.config/cocx/hooks/),
+# implement the two verbs against your hosting provider's API, chmod +x, and point
+# PROVIDER_HOOK at it in cocx.conf. Keep credentials next to the hook, never in the repo.
+#
+# Contract:
+#   set-rdns <ip> <hostname>  Make the reverse DNS of <ip> (v4 or v6) equal <hostname>.
+#                             Read the current PTR first and do nothing when it matches.
+#   open-smtp                 Remove any provider-side block on OUTBOUND tcp/25 (many
+#                             hosts block it by default; inbound usually works, so mail
+#                             arrives while the outbound queue silently backs up).
+#                             Only ever REMOVE a block — never rewrite unrelated rules.
+#   Exit 0 when done or already correct; non-zero on failure (cocx warns and continues).
+#   Runs on the operator machine. stdout/stderr are shown indented in cocx's output.
+#
+# Tips that cost real time to learn:
+#   * When an API edit replaces a whole rule set, read the live config and send ALL of it
+#     back minus the one change; omitted fields are often defaulted, which turns a small
+#     edit into an outage.
+#   * Match SMTP ports exactly ("25" is not in "2525") and honour ranges ("20-30").
+#   * Short-lived access tokens: mint a fresh one per call rather than caching.
+set -euo pipefail
+
+case "${1:-}" in
+  set-rdns)
+    ip="${2:?ip}"; name="${3:?hostname}"
+    echo "TODO: set PTR $ip -> $name via your provider's API" >&2
+    exit 1 ;;
+  open-smtp)
+    echo "TODO: lift the outbound SMTP block via your provider's API" >&2
+    exit 1 ;;
+  *)
+    echo "usage: $0 set-rdns <ip> <hostname> | open-smtp" >&2
+    exit 2 ;;
+esac
