@@ -1,0 +1,131 @@
+# mox OpenPGP series — webmail/webmail.ts
+# generated against upstream 8802a33300229108c2de33af93757a9e4114f87a by mox/tools/regen-patches.sh
+# Keep the hunks small: everything that can live in webmail/pgp.ts should.
+--- a/webmail/webmail.ts
++++ b/webmail/webmail.ts
+@@ -86,6 +86,7 @@
+ import {css, ensureCSS, styles, styleClasses, equalAddress, formatAddress, formatAddressShort, formatEmail, loadMsgheaderView, isImage, renderText, formatDomain, join} from './lib'
+ import * as api from './api'
+ import * as icons from './icons'
++import { pgpRender, pgpKeysView, pgpEncryptForSubmit, pgpRenderRecipientStatus, pgpAutocryptNotice, pgpAutocryptKeydata } from './pgp'
+ 
+ // If we had to reload with a cache buster after a server update, the URL will
+ // start with ?v=.... Remove it and load again.
+@@ -1514,6 +1515,8 @@
+ 	let body: HTMLTextAreaElement
+ 	let attachments: HTMLInputElement
+ 	let requiretls: HTMLSelectElement
++	let pgpEncrypt: HTMLInputElement
++	let pgpStatus: HTMLElement
+ 
+ 	let toBtn: HTMLButtonElement, ccBtn: HTMLButtonElement, bccBtn: HTMLButtonElement, replyToBtn: HTMLButtonElement, customFromBtn: HTMLButtonElement
+ 	let replyToCell: HTMLElement, toCell: HTMLElement, ccCell: HTMLElement, bccCell: HTMLElement // Where we append new address views.
+@@ -1638,6 +1641,17 @@
+ 		await withStatus('Saving draft', draftSave())
+ 	}
+ 
++	// OpenPGP (cocx patch series): resolve a key for each recipient and report it.
++	// The rendering lives in pgp.ts so this stays one call and the "look this address
++	// up" affordance sits with the code that knows how to look one up.
++	const pgpCheck = async () => {
++		if (!pgpEncrypt || !pgpEncrypt.checked) {
++			dom._kids(pgpStatus)
++			return
++		}
++		await pgpRenderRecipientStatus(toViews.concat(ccViews).concat(bccViews).map(v => v.input.value).filter(s => s), pgpStatus)
++	}
++
+ 	const submit = async (archive: boolean) => {
+ 		draftCancelSaveTimer()
+ 		await draftSavePromise
+@@ -1688,6 +1702,31 @@
+ 			ArchiveThread: archive,
+ 			ArchiveReferenceMailboxID: opts.archiveReferenceMailboxID || 0,
+ 			DraftMessageID: draftMessageID,
++			PGPEncrypted: '',
++			PGPAutocryptKey: '',
++		}
++		// Autocrypt (cocx patch series). UNCONDITIONAL — attached to encrypted and
++		// plaintext mail alike, because the first message to a new correspondent is
++		// necessarily plaintext and a key that only travelled on encrypted mail could
++		// never bootstrap encryption. It carries a public key, not ciphertext, so the
++		// message stays exactly as readable as it was.
++		//
++		// Only the KEYDATA crosses; the server builds the header and takes addr= from
++		// the parsed From. Returns '' when there is no own key, and the server then
++		// emits no header at all. Never throws — an ordinary send must not depend on it.
++		message.PGPAutocryptKey = await pgpAutocryptKeydata(message.From)
++		// OpenPGP (cocx patch series). The body and attachments are encrypted here and
++		// replaced by the armor; the server wraps that as RFC 3156 multipart/encrypted
++		// and never sees the plaintext. A failure throws, so nothing is sent — falling
++		// back to sending in the clear would be the worst possible behaviour.
++		if (pgpEncrypt && pgpEncrypt.checked) {
++			message.PGPEncrypted = await pgpEncryptForSubmit({
++				to: message.To, cc: message.Cc, bcc: message.Bcc,
++				textBody: message.TextBody,
++				attachments: files.map(f => ({filename: f.Filename, dataURI: f.DataURI})),
++			})
++			message.TextBody = ''
++			message.Attachments = []
+ 		}
+ 		await client.MessageSubmit(message)
+ 		composeElem.remove()
+@@ -2179,6 +2218,17 @@
+ 						dom.option(attr.value('no'), 'Fallback to insecure'),
+ 					),
+ 				),
++				// OpenPGP (cocx patch series). Encryption happens in this browser; the
++				// server only ever sees the armor. The indicator resolves a key for every
++				// recipient as they are typed, because "no key for bob@example.com" has to
++				// be visible while composing, not as a failure on send.
++				dom.label(
++					style({margin: '1ex 0', display: 'block'}),
++					attr.title('Encrypt this message with OpenPGP before it leaves your browser. Every recipient needs a public key in your keyring (see the PGP button in the top bar). The subject is NOT encrypted — only the body and attachments.'),
++					pgpEncrypt=dom.input(attr.type('checkbox'), function change() { pgpCheck() }),
++					' Encrypt with OpenPGP ',
++					pgpStatus=dom.span(styleClasses.textMild),
++				),
+ 				dom.div(
+ 					scheduleLink=dom.a(attr.href(''), 'Schedule', function click(e: MouseEvent) {
+ 						e.preventDefault()
+@@ -3672,6 +3722,27 @@
+ 		loadButtons(pm)
+ 		loadHeaderDetails(pm)
+ 
++		// OpenPGP (cocx patch series).
++		const pgpCtx = {msgID: m.ID, pm: pm, content: msgcontentElem, scroll: msgscrollElem, mode: msgmodeElem}
++		// Autocrypt runs for EVERY message, including plaintext ones — bootstrapping a
++		// correspondent's key is the whole point, and their first mail is rarely
++		// encrypted. Renders nothing unless there is a key we do not already hold.
++		pgpAutocryptNotice(pgpCtx)
++		// Takes over rendering for encrypted and signed messages: decryption happens in
++		// this browser with a key the server does not have, so the server-rendered
++		// text/HTML views below cannot show the content. Returns false for everything
++		// else, which is every ordinary message.
++		if (await pgpRender(pgpCtx)) {
++			// ⚠ CLEAR THE LOADING STATE BEFORE RETURNING. updateState() sets `loading` on
++			// msgElem and hands newMsgView a messageLoaded callback to clear it again;
++			// the normal path calls it below. Returning early skipped it, so the pane kept
++			// `.loading { opacity: .1 }` forever and every decrypted message rendered at
++			// one tenth opacity — correct layout, correct text, nearly invisible, and ONLY
++			// on encrypted mail, which is what made it look like a colour bug.
++			messageLoaded()
++			return
++		}
++
+ 		const msgHeaderSeparatorStyle = css('msgHeaderSeparator', {borderTop: '1px solid', borderTopColor: styles.borderColor})
+ 		const msgModeWarningStyle = css('msgModeWarning', {backgroundColor: styles.warningBackgroundColor, padding: '0 .15em'})
+ 
+@@ -7138,6 +7209,12 @@
+ 					' ',
+ 					settingsBtn=dom.clickbutton('Settings', attr.title('Change settings for composing messages.'), clickCmd(cmdSettings, shortcuts)),
+ 					' ',
++					// OpenPGP (cocx patch series). Keys live in this browser, not on the
++					// server, so this is a client-side pane rather than an account setting.
++					dom.clickbutton('PGP', attr.title('Manage OpenPGP keys for reading encrypted mail. Keys are stored in this browser only; the server never sees your private key.'), function click() {
++						popup(css('popupPGP', {minWidth: '35em'}), style({maxWidth: '55em'}), pgpKeysView())
++					}),
++					' ',
+ 					accountElem=dom.span(),
+ 					' ',
+ 					loginAddressElem=dom.span(),

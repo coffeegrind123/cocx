@@ -1,0 +1,177 @@
+# mox OpenPGP series — webmail/api.go
+# generated against upstream 8802a33300229108c2de33af93757a9e4114f87a by mox/tools/regen-patches.sh
+# Keep the hunks small: everything that can live in webmail/pgp.ts should.
+--- a/webmail/api.go
++++ b/webmail/api.go
+@@ -532,6 +532,31 @@
+ 	ArchiveThread             bool       // If set, thread is archived after sending message.
+ 	ArchiveReferenceMailboxID int64      // If ArchiveThread is set, thread messages from this mailbox ID are moved to the archive mailbox ID. E.g. of Inbox.
+ 	DraftMessageID            int64      // If set, draft message that will be removed after sending.
++
++	// If non-empty, an ASCII-armored OpenPGP message ("-----BEGIN PGP MESSAGE-----").
++	// The message is composed as RFC 3156 multipart/encrypted instead of the usual
++	// text/plain or multipart/mixed body, and TextBody/Attachments are ignored — the
++	// client has already encrypted them into this blob.
++	//
++	// Deliberately the ARMOR and not a whole raw MIME message: the server keeps
++	// control of every header, so a client cannot inject a Bcc, a second body or a
++	// forged Date into an outgoing message. Added by the cocx OpenPGP patch series.
++	PGPEncrypted string
++
++	// If non-empty, base64 of the sender's BINARY OpenPGP public key (not the armor).
++	// The server turns it into an `Autocrypt:` header so recipients can encrypt their
++	// REPLIES to us. Added by the cocx OpenPGP patch series.
++	//
++	// ⚠ Sent on EVERY message, encrypted or not, and that is the point: the first mail
++	// to a new correspondent is necessarily plaintext, so a key that only travelled on
++	// encrypted mail could never bootstrap encryption. The message itself is unaffected.
++	//
++	// ⚠ The CLIENT SENDS KEY MATERIAL, NEVER A HEADER. addr= below is taken from the
++	// parsed From, not from the browser, and the value is validated to a strict base64
++	// charset — which is what makes header injection impossible. Accepting a ready-made
++	// header line here would reopen exactly the hole PGPEncrypted's armor-only rule
++	// closes: a client must not be able to put a line into a message we DKIM-sign.
++	PGPAutocryptKey string
+ }
+ 
+ // ForwardAttachments references attachments by a list of message.Part paths.
+@@ -602,6 +627,95 @@
+ 	return buf
+ }
+ 
++// xpgpAutocryptHeader builds an `Autocrypt:` header value from client-supplied base64
++// key material, or returns "" when there is nothing usable to send.
++//
++// ⚠ THE CHARSET CHECK IS THE SECURITY CONTROL, not a tidiness check. The only thing
++// standing between a browser and an injected header is that CR and LF cannot survive
++// this loop: the value is rebuilt from a strict base64 alphabet, so a newline (or a
++// second header, or a Bcc) cannot be smuggled through. Never relax it to "trim and
++// hope" — mox writes headers with a bare Fprintf and does no escaping of its own.
++//
++// ⚠ IT MUST BE FOLDED. message.Composer.Header is `fmt.Fprintf("%s: %s\r\n")` with no
++// folding whatsoever, and a real key is several KB of base64 — far past RFC 5322's
++// 998-octet line limit. An over-long header line is not a clean failure: it is mail that
++// some servers refuse and some parsers silently mangle. Continuation lines begin with a
++// space, which is what every Autocrypt parser (including our own parseAutocrypt) unfolds.
++//
++// Anything wrong here yields "" and therefore NO header — an ordinary, perfectly valid
++// message. Opportunistic key distribution must never be able to break a send.
++// Added by the cocx OpenPGP patch series.
++func xpgpAutocryptHeader(keydata string, from smtp.Address) string {
++	const maxSize = 64 * 1024
++	if keydata == "" || len(keydata) > maxSize {
++		return ""
++	}
++	for i := 0; i < len(keydata); i++ {
++		c := keydata[i]
++		ok := c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '='
++		if !ok {
++			return ""
++		}
++	}
++	// prefer-encrypt=nopreference, deliberately, not "mutual". Mutual tells peers to
++	// encrypt BY DEFAULT, which is a promise we cannot keep while the private key lives
++	// only in one browser: the admin mailbox reads over IMAP and would be handed
++	// ciphertext it cannot open. Revisit when the key is somewhere the server can use.
++	var b strings.Builder
++	b.WriteString("addr=")
++	b.WriteString(from.Pack(true))
++	b.WriteString("; prefer-encrypt=nopreference; keydata=")
++	const width = 72
++	for i := 0; i < len(keydata); i += width {
++		j := i + width
++		if j > len(keydata) {
++			j = len(keydata)
++		}
++		if i > 0 {
++			b.WriteString("\r\n ")
++		}
++		b.WriteString(keydata[i:j])
++	}
++	return b.String()
++}
++
++// xpgpArmor validates a client-supplied ASCII-armored OpenPGP message and returns it
++// with CRLF line endings, ready to be written as a MIME part body.
++//
++// Everything about this is defensive. The value crosses from a browser into a message
++// this server will sign with our DKIM key and send under our domain's reputation, so it
++// is checked rather than trusted:
++//   - it must actually be an OpenPGP armored MESSAGE, not a key block, not a signature,
++//     and not arbitrary text. A recipient whose client sees multipart/encrypted and then
++//     cannot find a message inside gets a broken mail from us.
++//   - it must be pure 7-bit ASCII apart from line endings. Armor is base64 plus header
++//     lines and can be nothing else; anything outside that range means the client sent
++//     something other than what it claimed.
++//   - line endings are normalised to CRLF, because a bare LF inside a MIME part is
++//     tolerated by most parsers and rejected by strict ones, and the client is a browser
++//     where "\n" is the natural thing to produce.
++// Added by the cocx OpenPGP patch series.
++func xpgpArmor(ctx context.Context, s string) []byte {
++	const maxSize = 100 * 1024 * 1024
++	if len(s) > maxSize {
++		xcheckuserf(ctx, errors.New("too large"), "checking pgp message")
++	}
++	s = strings.ReplaceAll(s, "\r\n", "\n")
++	s = strings.TrimSpace(s)
++	if !strings.HasPrefix(s, "-----BEGIN PGP MESSAGE-----") || !strings.HasSuffix(s, "-----END PGP MESSAGE-----") {
++		xcheckuserf(ctx, errors.New("not an ascii-armored openpgp message"), "checking pgp message")
++	}
++	for _, c := range []byte(s) {
++		if c == '\n' {
++			continue
++		}
++		if c < 0x20 || c > 0x7e {
++			xcheckuserf(ctx, errors.New("armor contains non-ascii or control characters"), "checking pgp message")
++		}
++	}
++	return []byte(strings.ReplaceAll(s, "\n", "\r\n") + "\r\n")
++}
++
+ // MessageSubmit sends a message by submitting it the outgoing email queue. The
+ // message is sent to all addresses listed in the To, Cc and Bcc addresses, without
+ // Bcc message header.
+@@ -810,9 +924,42 @@
+ 	if m.RequireTLS != nil && !*m.RequireTLS {
+ 		xc.Header("TLS-Required", "No")
+ 	}
++	// Autocrypt, beside the other message-level headers and BEFORE the body: it applies
++	// to the message as a whole, encrypted or not.
++	if v := xpgpAutocryptHeader(m.PGPAutocryptKey, fromAddr.Address); v != "" {
++		xc.Header("Autocrypt", v)
++	}
+ 	xc.Header("MIME-Version", "1.0")
+ 
+-	if len(m.Attachments) > 0 || len(m.ForwardAttachments.Paths) > 0 {
++	if m.PGPEncrypted != "" {
++		// RFC 3156 multipart/encrypted. The ciphertext was produced in the browser;
++		// everything structural is built here so the client cannot influence it.
++		armor := xpgpArmor(ctx, m.PGPEncrypted)
++
++		mp := multipart.NewWriter(xc)
++		xc.Header("Content-Type", fmt.Sprintf(`multipart/encrypted; protocol="application/pgp-encrypted"; boundary="%s"`, mp.Boundary()))
++		xc.Line()
++
++		vhdr := textproto.MIMEHeader{}
++		vhdr.Set("Content-Type", "application/pgp-encrypted")
++		vhdr.Set("Content-Description", "PGP/MIME version identification")
++		vp, err := mp.CreatePart(vhdr)
++		xcheckf(ctx, err, "adding pgp version part")
++		_, err = vp.Write([]byte("Version: 1\r\n"))
++		xcheckf(ctx, err, "writing pgp version part")
++
++		chdr := textproto.MIMEHeader{}
++		chdr.Set("Content-Type", `application/octet-stream; name="encrypted.asc"`)
++		chdr.Set("Content-Description", "OpenPGP encrypted message")
++		chdr.Set("Content-Disposition", `inline; filename="encrypted.asc"`)
++		cp, err := mp.CreatePart(chdr)
++		xcheckf(ctx, err, "adding pgp ciphertext part")
++		_, err = cp.Write(armor)
++		xcheckf(ctx, err, "writing pgp ciphertext part")
++
++		err = mp.Close()
++		xcheckf(ctx, err, "writing mime multipart")
++	} else if len(m.Attachments) > 0 || len(m.ForwardAttachments.Paths) > 0 {
+ 		mp := multipart.NewWriter(xc)
+ 		xc.Header("Content-Type", fmt.Sprintf(`multipart/mixed; boundary="%s"`, mp.Boundary()))
+ 		xc.Line()

@@ -1,0 +1,16 @@
+# mox OpenPGP series — Makefile
+# generated against upstream 8802a33300229108c2de33af93757a9e4114f87a by mox/tools/regen-patches.sh
+# Keep the hunks small: everything that can live in webmail/pgp.ts should.
+--- a/Makefile
++++ b/Makefile
+@@ -140,8 +140,8 @@
+ 	-mkdir -p node_modules/.bin
+ 	npm install --ignore-scripts --save-dev --save-exact typescript@7.0.2 esbuild@v0.28.1
+ 
+-webmail/webmail.js: webmail/webmail.ts webmail/icons.ts webmail/api.ts webmail/lib.ts lib.ts
+-	./tsc.sh $@ webmail/webmail.ts webmail/icons.ts webmail/api.ts webmail/lib.ts lib.ts
++webmail/webmail.js: webmail/webmail.ts webmail/pgp.ts webmail/icons.ts webmail/api.ts webmail/lib.ts lib.ts
++	./tsc.sh $@ webmail/webmail.ts webmail/pgp.ts webmail/icons.ts webmail/api.ts webmail/lib.ts lib.ts
+ 
+ webmail/msg.js: webmail/msg.ts webmail/api.ts webmail/lib.ts lib.ts
+ 	./tsc.sh $@ webmail/msg.ts webmail/api.ts webmail/lib.ts lib.ts
