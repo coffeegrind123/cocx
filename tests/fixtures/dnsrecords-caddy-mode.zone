@@ -1,0 +1,76 @@
+; Time To Live of 5 minutes, may be recognized if importing as a zone file.
+; Once your setup is working, you may want to increase the TTL.
+$TTL 300
+
+; For the machine, only needs to be created once, for the first domain added:
+; 
+; SPF-allow host for itself, resulting in relaxed DMARC pass for (postmaster)
+; messages (DSNs) sent from host:
+mail.example.com.               TXT "v=spf1 a -all"
+
+; For the machine, only needs to be created once, for the first domain added:
+; 
+; Request reporting about success/failures of TLS connections to (MX) host, for DANE.
+_smtp._tls.mail.example.com.            TXT "v=TLSRPTv1; rua=mailto:tlsreports@mail.example.com"
+
+; Deliver email for the domain to this host.
+example.com.                    MX 10 mail.example.com.
+
+; Outgoing messages will be signed with the first two DKIM keys. The other two
+; configured for backup, switching to them is just a config change.
+; NOTE: The following is a single long record split over several lines for use
+; in zone files. When adding through a DNS operator web interface, combine the
+; strings into a single string, without ().
+2026a._domainkey.example.com.   TXT (
+ 		"v=DKIM1;h=sha256;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmJdghVxZlLIcZbmketXhUaayQptEsSzM5Hk/p"
+ 		"rd0Q/OhPuXloeSxE/+d4xGufCQwY8l/Ee3S5AEAElaWtOYhXAsMvmOnMb5E7pRivzPe1KRmzT87P7OLOQidRTNnGjJJz4wqTOpCi"
+ 		"ik3GlIE0vrfoInCE+bTAfJEkZk5MhknsWAEkdMUqlny7Uoh0iClktUQ5thJdt6pfn/13eq26BFIhlpEKSahkxk82yZGP77MSEm3V"
+ 		"MgtHb+gLFs9GiF2oJEWGESYnoc1feh8KiKSP/sumKSxa6whqSl8Ak1k/GxIgUeKu0RmpHS7hYx6T8Pl3leo3RTWZAyP0j9VUXPyu"
+ 		"fNjeQIDAQAB"
+	)
+; NOTE: The following is a single long record split over several lines for use
+; in zone files. When adding through a DNS operator web interface, combine the
+; strings into a single string, without ().
+2026b._domainkey.example.com.   TXT (
+ 		"v=DKIM1;h=sha256;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6vKHKV84E67O/gXnQfyxYKtPGJiuw6axCMuzJ"
+ 		"ApzNN9tqubKKYz0Bqbvl9on3RwEinFzhR2TALeW6sUujME2qfB3wTnWXu/YoP+VghaHkF+du6nF5u7KoG6XDoNxX8E9TyELllhvl"
+ 		"+7ew55jNZm3JeQB+sCMgXyvWFr2dDxo6is0WDzbyoJ9YOTkoA4ProOKqEzDVu09Vf5xyipmNTx3gIQ5mpkA+oh/obcLiTaSMhhWi"
+ 		"jeBMYRFB/6IO+0wHhu0jc/rbQqznIp/l7ovoN15EnSYuzbow4Ee7r40jUOdBNr1zcOMMUgpMVtkPn5/3q/ssO0nOyGVIWNu5mGZ6"
+ 		"+AmRwIDAQAB"
+	)
+
+; Specify the MX host is allowed to send for our domain and for itself (for DSNs).
+; ~all means softfail for anything else, which is done instead of -all to prevent older
+; mail servers from rejecting the message because they never get to looking for a dkim/dmarc pass.
+example.com.                    TXT "v=spf1 ip4:172.17.0.5 mx ~all"
+
+; Emails that fail the DMARC check (without aligned DKIM and without aligned SPF)
+; should be rejected, and request reports. If you email through mailing lists that
+; strip DKIM-Signature headers and don't rewrite the From header, you may want to
+; set the policy to p=none.
+_dmarc.example.com.             TXT "v=DMARC1;p=reject;rua=mailto:dmarcreports@example.com!10m"
+
+; Remote servers can use MTA-STS to verify our TLS certificate with the
+; WebPKI pool of CA's (certificate authorities) when delivering over SMTP with
+; STARTTLS.
+mta-sts.example.com.            CNAME mail.example.com.
+_mta-sts.example.com.           TXT "v=STSv1; id=20261003T222449"
+
+; Request reporting about TLS failures.
+_smtp._tls.example.com.         TXT "v=TLSRPTv1; rua=mailto:tlsreports@example.com"
+
+; Autoconfig is used by Thunderbird. Autodiscover is (in theory) used by Microsoft.
+autoconfig.example.com.         CNAME mail.example.com.
+_autodiscover._tcp.example.com. SRV 0 1 443 mail.example.com.
+
+; For secure IMAP and submission autoconfig, point to mail host.
+_imaps._tcp.example.com.        SRV 0 1 993 mail.example.com.
+_submissions._tcp.example.com.  SRV 0 1 465 mail.example.com.
+
+; Next records specify POP3 and non-TLS ports are not to be used.
+; These are optional and safe to leave out (e.g. if you have to click a lot in a
+; DNS admin web interface).
+_imap._tcp.example.com.         SRV 0 0 0 .
+_submission._tcp.example.com.   SRV 0 0 0 .
+_pop3._tcp.example.com.         SRV 0 0 0 .
+_pop3s._tcp.example.com.        SRV 0 0 0 .
