@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Enabled by `make hooks` (git config core.hooksPath .githooks).
+exec python3 "$(git rev-parse --show-toplevel)/tools/scrub.py" --staged

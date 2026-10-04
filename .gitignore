@@ -1,0 +1,6 @@
+tests/.cache/
+__pycache__/
+*.pyc
+cocx.conf
+mox/out/
+tests/.tmp-*
