@@ -51,6 +51,9 @@ check "unknown WEBSERVER is refused"          nonzero "$ROOT/cocx" -c "$(conf WE
 check "account outside MAIL_DOMAIN refused"   nonzero "$ROOT/cocx" -c "$(conf MAIL_ACCOUNT=admin@other.example)" vhost
 check "caddy-external without cert dir"       nonzero "$ROOT/cocx" -c "$(conf WEBSERVER=caddy-external)" vhost
 check "relative ROOT_REDIRECT refused"        nonzero "$ROOT/cocx" -c "$(conf ROOT_REDIRECT=example.com)" vhost
+check "neutral regexp matching inbox refused" nonzero "$ROOT/cocx" -c "$(conf 'JUNK_NEUTRAL_RE="^(inbox|introbox|neutral|postmaster|dmarc|tlsrpt|rejects)"')" vhost
+check "neutral regexp missing rejects refused" nonzero "$ROOT/cocx" -c "$(conf 'JUNK_NEUTRAL_RE="^(introbox|neutral)"')" vhost
+check "default neutral regexp accepted"      0       "$ROOT/cocx" -c "$(conf)" vhost
 check "unknown command is refused"            nonzero "$ROOT/cocx" -c "$(conf)" frobnicate
 check "help works without a config"           0       "$ROOT/cocx" help
 

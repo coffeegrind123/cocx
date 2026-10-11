@@ -13,11 +13,12 @@ test:
 	node filter/test/mail-filter.test.mjs
 	python3 tests/test_mail_dns.py
 	python3 tests/test_bimi.py
+	python3 tests/test_junk_neutral.py
 	bash tests/test_cli.sh
 
 lint:
 	$(SHELLCHECK) -x -s bash $(SH_FILES)
-	python3 -m py_compile tools/*.py remote/imap-reset.py tests/*.py
+	python3 -m py_compile tools/*.py remote/imap-reset.py remote/junk-neutral.py tests/*.py
 	node --check filter/mail-filter.js && node --check filter/imap-client.js && node --check filter/mime-parse.js
 
 scrub:

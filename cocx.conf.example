@@ -61,6 +61,10 @@ PROVIDER_HOOK=
 # ---------------------------------------------------------------------------- policy
 MTASTS_MAXAGE=168h0m0s               # senders cache AND enforce this long; 1 week
 ROLE_ADDRESSES="abuse"               # RFC 2142 aliases to MAIL_ACCOUNT (postmaster is built in)
+# Mailboxes whose mail trains mox's junk filter NEITHER way. Must not match inbox (or
+# delivered mail never counts as ham and first-contact mail gets rejected) and must match
+# rejects. quickstart's own default includes inbox; cocx replaces it.
+JUNK_NEUTRAL_RE="^(introbox|neutral|postmaster|dmarc|tlsrpt|rejects)"
 CAA_ISSUERS="letsencrypt.org sectigo.com"   # sectigo = Caddy's ZeroSSL fallback; keep it
 
 # BIMI inbox logo. Either a local SVG Tiny PS file cocx serves at

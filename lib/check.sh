@@ -214,6 +214,17 @@ health_check() {
     fi
   fi
 
+  # --- junk training: Inbox must train as ham (ensure_junk_training) --------------
+  local nre
+  nre="$(rsh_q "python3 - get '${MAIL_ACCOUNT%%@*}'" < "$COCX_DIR/remote/junk-neutral.py")"
+  if [ -z "$nre" ]; then
+    note "junk training" "no NeutralMailboxRegexp for ${MAIL_ACCOUNT%%@*} (AutomaticJunkFlags off?)"
+  elif [[ inbox =~ $nre ]]; then
+    bad "junk training" "Inbox is neutral ($nre) — delivered mail never trains as ham and first-contact mail gets 451'd (cocx update)"
+  else
+    ok "junk training" "Inbox trains as ham"
+  fi
+
   # --- backups -------------------------------------------------------------------
   if [ "${BACKUP:-yes}" = "yes" ]; then
     local bt last age

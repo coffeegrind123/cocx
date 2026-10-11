@@ -291,6 +291,26 @@ That is not a consolation prize: quickstart sets `AutomaticJunkFlags` with
 does run at SMTP time — and which classifies nothing at all while the Junk mailbox is
 empty.
 
+**Ham has to be trained too.** quickstart also lists `inbox` in `NeutralMailboxRegexp`, so
+delivered mail never counts as ham. The ham class then shrinks to your own Sent mail while
+Junk fills with phishing that imitates transactional mail, and the bayesian filter starts
+rejecting first-contact notifications — signup codes, verifications, receipts — with
+`reason=junk-content` (451). On the system cocx was extracted from that came to 403 rejected
+against 1 accepted in two weeks. cocx sets `JUNK_NEUTRAL_RE` (default
+`^(introbox|neutral|postmaster|dmarc|tlsrpt|rejects)`) on install and every update, refuses a
+value that matches `inbox` or misses `rejects`, and `cocx check` reports `junk training`.
+It applies to new deliveries only. Keep the training sets honest:
+
+- **Archive read mail instead of deleting it.** mox untrains a message when it is expunged.
+- **Never move your own mail or bounces into Junk.**
+- **Recover a wrongly rejected message from `Rejects` by moving it to `Archive`.** That also
+  trains it as ham.
+- **A sender can also be refused on reputation (`reason=dkimspf`).** mox checks every DKIM
+  domain that signed the message. Mail from a shared sender such as Amazon SES
+  (`amazonses.com`) or SendGrid inherits that platform's history in your mailboxes: two
+  junked SES phishing mails and no SES ham will refuse every new SES sender. Archiving one
+  real message from that platform clears it.
+
 **Scoring, not a keyword list.** Scam pretexts rotate (Nigeria → Syria → Ukraine → Gaza);
 the advance-fee *structure* does not. A verdict needs `score ≥ threshold` **and** two
 categories scoring at least `minCategoryScore`, or one `solo` category maxed out.

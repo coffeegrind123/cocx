@@ -394,6 +394,42 @@ cd /home/mox && ./mox config test >/dev/null
 EOS
 }
 
+# Junk-filter HAM training. quickstart lists `inbox` as NEUTRAL, so delivered mail is never
+# trained as ham — only mail moved to a non-neutral folder (Archive) is. The ham class is
+# then little more than your own Sent mail while Junk fills with phishing that imitates
+# transactional mail, and the SMTP-time bayesian filter starts 451-ing every first-contact
+# notification: signup codes, verifications, receipts (`reason=junk-content`, measured
+# 403 rejected vs 1 accepted over two weeks on the system this was extracted from).
+#
+# Without `inbox`, delivered mail counts as ham until moved to Junk, which retrains it
+# (mox store.Message.JunkFlagsForMailbox: no NotJunk regexp + not junk + not neutral =>
+# $NotJunk). Introbox stays neutral (mox trains on the move out of it) and Rejects must
+# never train either way — `cocx` refuses a JUNK_NEUTRAL_RE that breaks either rule.
+# Only NEW deliveries are affected; mail already in Inbox keeps its neutral flags.
+ensure_junk_training() {
+  local acct="${MAIL_ACCOUNT%%@*}" cur bak rc=0
+  msg "Ensuring junk-filter NeutralMailboxRegexp = $JUNK_NEUTRAL_RE ($acct)..."
+  cur="$(rsh "python3 - get '$acct'" < "$COCX_DIR/remote/junk-neutral.py")" || rc=$?
+  if [ "$rc" = 3 ]; then
+    warn "account $acct has no NeutralMailboxRegexp (AutomaticJunkFlags off?) — left as is"
+    return 0
+  fi
+  [ "$rc" = 0 ] || die "could not read NeutralMailboxRegexp for account $acct (exit $rc)"
+  if [ "$cur" = "$JUNK_NEUTRAL_RE" ]; then
+    echo "    already $cur"
+    return 0
+  fi
+
+  bak="$MOX_HOME/config/domains.conf.bak-$(date +%Y%m%d-%H%M%S)"
+  rsh "cp -a $MOX_HOME/config/domains.conf '$bak'"
+  rsh "python3 - set '$acct' '$JUNK_NEUTRAL_RE'" < "$COCX_DIR/remote/junk-neutral.py" | sed 's/^/    /'
+  # domains.conf is reloaded live, so a bad edit must never be left in place.
+  if ! rsh "cd $MOX_HOME && ./mox config test >/dev/null"; then
+    rsh "cp -a '$bak' $MOX_HOME/config/domains.conf"
+    die "mox config test failed after setting NeutralMailboxRegexp — restored $bak"
+  fi
+}
+
 # mox-mode web handlers, all named cocx-* and fully reconciled on every run: handlers
 # cocx owns are removed and the wanted set re-added, so changing BIMI_LOGO or
 # ROOT_REDIRECT never stacks duplicates. Handlers the operator added are left alone.

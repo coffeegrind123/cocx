@@ -100,6 +100,7 @@ DNS_PROVIDER="${DNS_PROVIDER:-manual}"
 CF_TOKEN_FILE="$(expand "${CF_TOKEN_FILE:-~/.config/cocx/cloudflare_token}")"
 PROVIDER_HOOK="$(expand "${PROVIDER_HOOK:-}")"
 MTASTS_MAXAGE="${MTASTS_MAXAGE:-168h0m0s}"
+JUNK_NEUTRAL_RE="${JUNK_NEUTRAL_RE:-^(introbox|neutral|postmaster|dmarc|tlsrpt|rejects)}"
 ROLE_ADDRESSES="${ROLE_ADDRESSES-abuse}"
 CAA_ISSUERS="${CAA_ISSUERS:-letsencrypt.org sectigo.com}"
 BIMI_LOGO="$(expand "${BIMI_LOGO:-}")"
@@ -115,6 +116,13 @@ case "$WEBSERVER" in caddy|caddy-external|mox) ;; *) die "WEBSERVER must be cadd
 case "$CADDY_ISSUER" in letsencrypt|letsencrypt-staging|internal) ;; *) die "CADDY_ISSUER must be letsencrypt, letsencrypt-staging or internal" ;; esac
 case "$DNS_PROVIDER" in cloudflare|manual|none) ;; *) die "DNS_PROVIDER must be cloudflare, manual or none" ;; esac
 case "$PUBLIC_WEBMAIL" in yes|no) ;; *) die "PUBLIC_WEBMAIL must be yes or no" ;; esac
+# The two rules ensure_junk_training (lib/mox.sh) exists for. Bash ERE and mox's Go RE2
+# agree on the alternation-of-prefixes shape this setting takes.
+case "$JUNK_NEUTRAL_RE" in *"'"*) die "JUNK_NEUTRAL_RE must not contain a single quote" ;; esac
+[[ inbox =~ $JUNK_NEUTRAL_RE ]] \
+  && die "JUNK_NEUTRAL_RE matches inbox — delivered mail would never train as ham, and the junk filter ends up rejecting first-contact mail (docs/OPERATIONS.md § The junk filter)"
+[[ rejects =~ $JUNK_NEUTRAL_RE ]] \
+  || die "JUNK_NEUTRAL_RE must match rejects — mail mox already rejected must never train either way"
 [ "${MAIL_ACCOUNT#*@}" = "$MAIL_DOMAIN" ] \
   || die "MAIL_ACCOUNT ($MAIL_ACCOUNT) must be an address at MAIL_DOMAIN ($MAIL_DOMAIN) — quickstart derives the domain from it"
 case "$MAIL_HOSTNAME" in *".$MAIL_DOMAIN") ;; *) warn "MAIL_HOSTNAME is not under MAIL_DOMAIN — fine for mox, but the DNS sync only manages records inside the zone" ;; esac
@@ -159,6 +167,7 @@ do_install() {
   configure_mox
   setup_dane
   ensure_mtasts_maxage
+  ensure_junk_training
   ensure_mox_web_handlers
   install_units
   restart_mox
@@ -198,6 +207,7 @@ do_update() {
   configure_mox
   setup_dane
   ensure_mtasts_maxage
+  ensure_junk_training
   ensure_mox_web_handlers
   install_units
   after="$(rsh_q "md5sum $MOX_HOME/config/mox.conf $MOX_HOME/config/dane-mail.key")"
