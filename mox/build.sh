@@ -278,7 +278,8 @@ MARKERS=(
   'encrypted but unsigned' \
   'Autocrypt' \
   'Look up' \
-  'keys.openpgp.org'
+  'keys.openpgp.org' \
+  'including Trash, Junk and Rejects. Total messages'
 )
 for marker in "${MARKERS[@]}"
 do

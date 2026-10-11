@@ -1,5 +1,5 @@
 # mox OpenPGP series — webmail/api.go
-# generated against upstream 8802a33300229108c2de33af93757a9e4114f87a by mox/tools/regen-patches.sh
+# generated against upstream 58d0a7788a2e51629e1527dff73167ee6238b100 by mox/tools/regen-patches.sh
 # Keep the hunks small: everything that can live in webmail/pgp.ts should.
 --- a/webmail/api.go
 +++ b/webmail/api.go

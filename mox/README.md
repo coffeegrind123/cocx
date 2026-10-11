@@ -18,7 +18,8 @@ mox/
 │   └── openpgp.LICENSE
 ├── patches/                  the ONLY edits to upstream files
 │   ├── 0001-webmail-webmail-go.patch    embed + serve /openpgp.js
-│   ├── 0002-webmail-webmail-ts.patch    import, render hook, toolbar button, compose box
+│   ├── 0002-webmail-webmail-ts.patch    import, render hook, toolbar button, compose box,
+│   │                                    "All" row atop the mailbox list (search mb:)
 │   ├── 0003-webmail-api-go.patch        SubmitMessage.PGPEncrypted + multipart/encrypted
 │   └── 0004-Makefile.patch              add pgp.ts to the webmail.js target
 └── tools/

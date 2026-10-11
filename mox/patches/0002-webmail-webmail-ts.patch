@@ -1,5 +1,5 @@
 # mox OpenPGP series — webmail/webmail.ts
-# generated against upstream 8802a33300229108c2de33af93757a9e4114f87a by mox/tools/regen-patches.sh
+# generated against upstream 58d0a7788a2e51629e1527dff73167ee6238b100 by mox/tools/regen-patches.sh
 # Keep the hunks small: everything that can live in webmail/pgp.ts should.
 --- a/webmail/webmail.ts
 +++ b/webmail/webmail.ts
@@ -116,7 +116,94 @@
  		const msgHeaderSeparatorStyle = css('msgHeaderSeparator', {borderTop: '1px solid', borderTopColor: styles.borderColor})
  		const msgModeWarningStyle = css('msgModeWarning', {backgroundColor: styles.warningBackgroundColor, padding: '0 .15em'})
  
-@@ -7138,6 +7209,12 @@
+@@ -5722,6 +5793,7 @@
+ 		})
+ 
+ 		updateHidden()
++		updateAll()
+ 	}
+ 
+ 	const mailboxHidden = (mb: api.Mailbox, mailboxesMap: {[key: string]: api.Mailbox}) => {
+@@ -5756,6 +5828,41 @@
+ 		dom._kids(mailboxesElem, mailboxViews.filter(mbv => !mbv.hidden))
+ 	}
+ 
++	// "All" (cocx patch series): a row above the mailboxes listing every message in
++	// every mailbox, Trash/Junk/Rejects included. It is upstream's own "All mailboxes"
++	// search ("mb:" = Filter.MailboxID 0), opened through the location hash so the
++	// hashchange handler loads it exactly like a typed or bookmarked search. Reuses
++	// the mailbox row classes; their rules exist once the first MailboxView is built.
++	const allHash = '#search mb:'
++	const allShown = () => !mailboxViewActive && /^#search mb:(,[0-9]+)?(,compose:[0-9]+)?$/.test(decodeURIComponent(window.location.hash))
++	const openAll = () => {
++		if (decodeURIComponent(window.location.hash) !== allHash) {
++			window.location.hash = allHash
++		}
++	}
++	let allUnread: HTMLElement
++	const allElem = dom.div(dom._class('mailboxItem'), attr.tabindex('0'), attr.title('All messages in all mailboxes, including Trash, Junk and Rejects.'),
++		function click() { openAll() },
++		function keydown(e: KeyboardEvent) {
++			if (e.key === 'Enter') {
++				e.stopPropagation()
++				openAll()
++			}
++		},
++		dom.div(dom._class('mailbox'),
++			dom.div(dom._class('mailboxIcon')),
++			dom.div(dom._class('mailboxName'), 'All'),
++			allUnread=dom.b(dom._class('silenttitle')),
++		),
++	)
++	const updateAll = () => {
++		const total = mailboxViews.reduce((n, mbv) => n + mbv.mailbox.Total, 0)
++		const unread = mailboxViews.reduce((n, mbv) => n + mbv.mailbox.Unread, 0)
++		allElem.classList.toggle('active', allShown())
++		allElem.setAttribute('title', 'All messages in all mailboxes, including Trash, Junk and Rejects. Total messages: '+total)
++		dom._kids(allUnread, unread === 0 ? [] : [''+unread])
++	}
++
+ 	const root = dom.div()
+ 	const mailboxesElem = dom.div()
+ 
+@@ -5812,6 +5919,7 @@
+ 					},
+ 				),
+ 			),
++			allElem,
+ 			mailboxesElem,
+ 		),
+ 	)
+@@ -5828,6 +5936,8 @@
+ 	}
+ 
+ 	const closeMailbox = () => {
++		// Callers set the location hash for the new search after this returns.
++		setTimeout(updateAll)
+ 		if (!mailboxViewActive) {
+ 			return
+ 		}
+@@ -5847,6 +5957,7 @@
+ 
+ 		mailboxViewActive = mbv
+ 		mbv.root.classList.toggle('active', true)
++		updateAll()
+ 
+ 		updatePageTitle()
+ 
+@@ -5872,7 +5983,10 @@
+ 		mailboxLeaf: mailboxLeaf,
+ 		updateHidden: updateHidden,
+ 
+-		updateCounts: (): void => mailboxViews.forEach(mbv => mbv.update()),
++		updateCounts: (): void => {
++			mailboxViews.forEach(mbv => mbv.update())
++			updateAll()
++		},
+ 
+ 		activeMailbox: () => mailboxViewActive ? mailboxViewActive.mailbox : null,
+ 		mailboxes: (): api.Mailbox[] => mailboxViews.map(mbv => mbv.mailbox),
+@@ -7138,6 +7252,12 @@
  					' ',
  					settingsBtn=dom.clickbutton('Settings', attr.title('Change settings for composing messages.'), clickCmd(cmdSettings, shortcuts)),
  					' ',
